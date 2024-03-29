@@ -35,6 +35,7 @@ public:
     bool unlock() {
         return pthread_mutex_unlock(&m_mutex) == 0;
     }
+
     // get private num:mutex
     pthread_mutex_t* get() {
         return &m_mutex;
@@ -59,12 +60,12 @@ public:
         pthread_cond_destroy(&m_cond);
     }
 
-    // 阻塞，调用了该函数，线程会阻塞
+    // 阻塞，调用了该函数，线程会阻塞，并且释放锁
     bool wait(pthread_mutex_t *mutex) {
         return pthread_cond_wait(&m_cond, mutex) == 0;
     }
 
-    // 阻塞多长时间，调用该函数，线程会阻塞，直到指定的时间结束
+    // 阻塞多长时间，调用该函数，线程会阻塞并占用锁，直到指定的时间结束并且释放锁
     bool timewait(pthread_mutex_t *mutex, struct timespec t) {
         return pthread_cond_timedwait(&m_cond, mutex, &t) == 0;
     }

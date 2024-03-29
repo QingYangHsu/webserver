@@ -15,7 +15,8 @@ connection_pool::connection_pool()
 	this->CurConn = 0;
 	this->FreeConn = 0;
 }
-//懒汉模式
+
+//懒汉模式 获取一个数据库连接池类的实例
 connection_pool *connection_pool::GetInstance()
 {
 	static connection_pool connPool;
@@ -40,7 +41,7 @@ void connection_pool::init(string url, string User, string PassWord, string DBNa
 		if (con == NULL)//mysql结构体对象初始化失败
 		{
 			cout << "Error:" << mysql_error(con);
-			exit(1);
+			exit(-1);
 		}
 		/*
 		mysql_real_connect()函数原型如下：
@@ -63,13 +64,13 @@ void connection_pool::init(string url, string User, string PassWord, string DBNa
 		if (con == NULL)//con与server连接失败
 		{
 			cout << "Error: " << mysql_error(con);
-			exit(1);
+			exit(-1);
 		}
 		connList.push_back(con);//将已经与server连接好的client插入链表
 		++FreeConn;//空闲连接数++
 	}
 
-	reserve = sem(FreeConn);//用总共建立的空闲连接总数 初始化信号量
+	reserve = sem(FreeConn);//用总共建立的空闲连接总数 初始化信号量初始值 本lab为8
 
 	this->MaxConn = FreeConn;
 	
@@ -77,8 +78,8 @@ void connection_pool::init(string url, string User, string PassWord, string DBNa
 }
 
 
-//当有请求时，从数据库连接池(即链表)中返回一个可用连接(一个已经与server连接的client)，调用线程更新使用和空闲连接数
-//消费者customer
+//当有请求时，从数据库连接池(即链表)中pop返回一个可用连接(一个已经与server连接的client)，调用线程更新使用和空闲连接数
+//这个函数相当于消费者customer
 MYSQL *connection_pool::GetConnection()
 {
 	MYSQL *con = NULL;
@@ -101,7 +102,7 @@ MYSQL *connection_pool::GetConnection()
 }
 
 //调用线程释放当前使用的连接 返回值 成功为true 失败为false
-//producer
+//这个函数相当于生产者producer
 bool connection_pool::ReleaseConnection(MYSQL *con)
 {
 	if (NULL == con)//要释放的连接为空
@@ -115,14 +116,14 @@ bool connection_pool::ReleaseConnection(MYSQL *con)
 
 	lock.unlock();
 
-	reserve.post();//信号量值加一 同时唤醒一个正在沉睡的调用GetConnection的线程
+	reserve.post();//信号量值加一 同时唤醒一个正在沉睡的调用GetConnection的线程（消费者）
 	return true;
 }
 
 //销毁数据库连接池 因为链表每一个节点都分配了空间 这个函数纯纯是给析构函数调用的
 void connection_pool::DestroyPool()
 {
-	lock.lock();//上锁
+	lock.lock();//上锁 因为链表是临界区资源
 	if (connList.size() > 0)
 	{
 		list<MYSQL *>::iterator it;//迭代器

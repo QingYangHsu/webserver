@@ -43,7 +43,7 @@ int force=0;
 int force_reload=0;
 int proxyport=80;
 char *proxyhost=NULL;
-int benchtime=30;
+int benchtime = 30;
 /* internal */
 int mypipe[2];
 char host[MAXHOSTNAMELEN];
@@ -74,9 +74,9 @@ static void benchcore(const char* host,const int port, const char *request);
 static int bench(void);
 static void build_request(const char *url);
 
-static void alarm_handler(int signal)
+static void alarm_handler(int signal)//定时器函数  
 {
-   timerexpired=1;
+   timerexpired=1;   //设置超时标志为1 用于从无限循环中跳出
 }	
 
 static void usage(void)
@@ -100,7 +100,7 @@ static void usage(void)
 	);
 };
 
-// ./webbench -c 1000 -t 5 http://192.168.88.100:9190/index.html
+//bash command example：./webbench -c 1000 -t 5 http://192.168.88.100:9190/index.html
 int main(int argc, char *argv[])
 {
  int opt=0;
@@ -198,6 +198,11 @@ int main(int argc, char *argv[])
  return bench();
 }
 
+/*
+该函数主要功能是构建一个HTTP请求。
+它根据给定的URL和一系列条件来构造一个完整的HTTP请求字符串，
+并将该字符串保存在request字符数组中
+*/
 void build_request(const char *url)
 {
   char tmp[10];
@@ -205,12 +210,14 @@ void build_request(const char *url)
 
   bzero(host,MAXHOSTNAMELEN);
   bzero(request,REQUEST_SIZE);
-
+   
+   //HTTP版本选择
   if(force_reload && proxyhost!=NULL && http10<1) http10=1;
   if(method==METHOD_HEAD && http10<1) http10=1;
   if(method==METHOD_OPTIONS && http10<2) http10=2;
   if(method==METHOD_TRACE && http10<2) http10=2;
-
+   
+   //请求方法设置
   switch(method)
   {
 	  default:
@@ -221,7 +228,8 @@ void build_request(const char *url)
   }
 		  
   strcat(request," ");
-
+   
+   //URL验证
   if(NULL==strstr(url,"://"))
   {
 	  fprintf(stderr, "\n%s: is not a valid URL.\n",url);
@@ -293,6 +301,7 @@ void build_request(const char *url)
 }
 
 /* vraci system rc error kod */
+//该压测的核心函数
 static int bench(void)
 {
   int i,j,k;	
@@ -322,10 +331,11 @@ static int bench(void)
   */
 
   /* fork childs */
-  for(i=0;i<clients;i++)
+  //父亲会造出来clients个儿子进程，每个儿子进程不会再造孙子进程
+  for(i = 0; i < clients; i++)
   {
 	   pid=fork();
-	   if(pid <= (pid_t) 0)
+	   if(pid <= (pid_t) 0)    //son
 	   {
 		   /* child process or error*/
 	           sleep(1); /* make childs faster */
@@ -340,12 +350,12 @@ static int bench(void)
 	  return 3;
   }
 
-  if(pid== (pid_t) 0)
+  if(pid== (pid_t) 0)   //son points here
   {
     /* I am a child */
     if(proxyhost==NULL)
       benchcore(host,proxyport,request);
-         else
+    else
       benchcore(proxyhost,proxyport,request);
 
          /* write results to pipe */
@@ -359,7 +369,8 @@ static int bench(void)
 	 fprintf(f,"%d %d %d\n",speed,failed,bytes);
 	 fclose(f);
 	 return 0;
-  } else
+  } 
+  else                  //father points here
   {
 	  f=fdopen(mypipe[0],"r");
 	  if(f==NULL) 
@@ -367,11 +378,15 @@ static int bench(void)
 		  perror("open pipe for reading failed.");
 		  return 3;
 	  }
-	  setvbuf(f,NULL,_IONBF,0);
+	  setvbuf(f,NULL,_IONBF,0);//对文件流 f 的所有 I/O 操作将直接进行，不使用任何内部缓冲区
 	  speed=0;
           failed=0;
           bytes=0;
-
+/*
+pid：是fscanf函数的返回值，它表示成功读取并赋值的输入项数。
+如果pid等于3，那么表示三个整数都被成功读取并赋值给i、j和k。
+如果pid小于3，那么表示在读取过程中遇到了问题，或者文件中的数据不足以满足读取三个整数的需求。
+*/
 	  while(1)
 	  {
 		  pid=fscanf(f,"%d %d %d",&i,&j,&k);
@@ -397,10 +412,11 @@ static int bench(void)
   return i;
 }
 
-void benchcore(const char *host,const int port,const char *req)
+//fork出的子进程调用该函数
+void benchcore(const char *host,const int port,const char *req)      //req是要发送的http请求字符串
 {
  int rlen;
- char buf[1500];
+ char buf[1500];                                                     //用于存储从socket读取的数据的缓冲区。
  int s,i;
  struct sigaction sa;
 
@@ -409,14 +425,15 @@ void benchcore(const char *host,const int port,const char *req)
  sa.sa_flags=0;
  if(sigaction(SIGALRM,&sa,NULL))
     exit(3);
- alarm(benchtime);
+ alarm(benchtime);            //开一个定时器
 
  rlen=strlen(req);
- nexttry:while(1)
+ nexttry:
+ while(1)
  {
-    if(timerexpired)
+    if(timerexpired)          //全局变量：用于标记是否超时 该标志位由定时器函数设置
     {
-       if(failed>0)
+       if(failed>0)           //用于计数失败的尝试次数。
        {
           /* fprintf(stderr,"Correcting failed by signal\n"); */
           failed--;
@@ -424,11 +441,23 @@ void benchcore(const char *host,const int port,const char *req)
        return;
     }
     s=Socket(host,port);                          
-    if(s<0) { failed++;continue;} 
-    if(rlen!=write(s,req,rlen)) {failed++;close(s);continue;}
+    if(s<0) //server的socket创建失败
+    { 
+      failed++;
+      continue;
+    } 
+    if(rlen != write(s,req,rlen)) {    //向server写请求消息失败
+      failed++;
+      close(s);
+      continue;
+   }
     if(http10==0) 
-	    if(shutdown(s,1)) { failed++;close(s);continue;}
-    if(force==0) 
+	    if(shutdown(s,1)) { //关闭socket的写端。
+         failed++;
+         close(s);
+         continue;
+      }
+    if(force==0) //"  -f|--force               Don't wait for reply from server.\n"
     {
             /* read all available data from socket */
 	    while(1)
@@ -445,10 +474,13 @@ void benchcore(const char *host,const int port,const char *req)
 	       else
 		       if(i==0) break;
 		       else
-			       bytes+=i;
+			       bytes+=i;           //bytes存储从server读到的字节数
 	    }
     }
-    if(close(s)) {failed++;continue;}
+    if(close(s)) {//关闭失败
+                  failed++;
+                  continue;
+                  }
     speed++;
  }
 }

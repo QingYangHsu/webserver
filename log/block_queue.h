@@ -1,6 +1,7 @@
 /*************************************************************
 *循环数组实现的阻塞队列，m_back = (m_back + 1) % m_max_size;  
 *线程安全，每个操作前都要先加互斥锁，操作完后，再解锁
+其实该阻塞队列功能和stl的链表一模一样 但是stl的链表中没有信号量来进行同步，所以重写了一个阻塞队列
 **************************************************************/
 
 #ifndef BLOCK_QUEUE_H 
@@ -13,7 +14,7 @@
 #include "../locker.h"
 using namespace std;
 
-template <class T>//类模板
+template <class T>//类模板 T是模版参数
 class block_queue//阻塞队列类 主要是用一个循环数组实现队列queue
 {
 public:
@@ -121,9 +122,11 @@ public:
         m_mutex.unlock();
         return tmp;
     }
+    
     //往队列添加元素，需要将所有使用队列的线程先唤醒
     //当有元素push进队列,相当于生产者生产了一个元素
     //若当前没有线程等待条件变量,则唤醒无意义
+    //producer
     bool push(const T &item)//返回值：true表示push成功 false表示push失败
     {
 
@@ -145,14 +148,15 @@ public:
         m_mutex.unlock();
         return true;
     }
+    
     //pop时,如果当前队列没有元素,将会等待条件变量
+    //customer
     bool pop(T &item)
     {
 
         m_mutex.lock();
         while (m_size <= 0)//如果当前实际容量已经等于0(不可能小于)，则休眠，其实还可以唤醒该条件变量队列上休眠的所有进程(当然主要是想唤醒生产者)，赶紧生产一个
         {                  //这里进程在156休眠被唤醒了之后，发现m_size大于0，就会跳出循环 
-            
             if (!m_cond.wait(m_mutex.get()))//该进程主动休眠，并将刚刚获得的锁交还 成功返回true 失败返回false
             {
                 m_mutex.unlock();//如果失败 说明进程休眠并且释放锁失败 手动释放锁 进程退出

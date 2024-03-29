@@ -16,8 +16,8 @@
 #include <pthread.h>
 #include "locker.h"
 #include "threadpool.h"
-#include "http_conn.h"
-#include "lst_timer.h"
+#include "./http/http_conn.h"
+#include "./lst_timer/lst_timer.h"
 #include "./log/log.h"
 #include "./CGImysql/sql_connection_pool.h"
 //表示定时时间为5秒 每隔5秒就会产生一个定时信号
@@ -27,18 +27,18 @@
 //最大可以有65535个客户 客户数组长度开到65535
 #define maxfd 65535
 
-//监听的最大事件数量
+//epoll监听的最大事件数量
 #define max_event_number 10000
 
-// #define SYNLOG  //同步写日志
- #define ASYNLOG //异步写日志
+// #define SYNLOG  //同步写日志 同步写日志直接写到磁盘文件
+ #define ASYNLOG //异步写日志 异步写日志先写到缓冲区 然后线程读取缓冲区内容再写到磁盘文件 又是一个生产者消费者问题
 
 #define listenfdET //server端采取边缘触发非阻塞 这里设置主要是在server处理新client连接的时候 边缘要用while循环
 // #define listenfdLT //server端采取水平触发阻塞 这里设置主要是在server处理新client连接的时候 水平只处理一次即可，用if
 
 //管道 pipefd[0]是读端 pipefd[1]是写端
 static int pipefd[2];
-//链表类
+//定时器链表类
 static sort_timer_lst timer_lst;
 
 //添加信号捕捉 第一个参数是信号 第二个参数是该信号的处理函数的函数指针
@@ -87,7 +87,7 @@ void sig_handler( int sig )//信号处理逻辑：将信号值写入到管道写
 
 void timer_handler()
 {
-    // 定时处理任务，实际上就是调用tick()函数 tick函数将链表中超时的结点删掉
+    // 定时处理任务，实际上就是调用tick()函数，遍历一遍链表上每个节点，将链表中超时的结点删掉
     timer_lst.tick();
     // 因为一次 alarm 调用只会引起一次SIGALARM 信号，所以我们要重新定时，以不断触发 SIGALARM信号。即一个接力的过程
     alarm(TIMESLOT);
@@ -98,11 +98,11 @@ void timer_handler()
 int main(int argc, char *argv[]) {
 
 #ifdef ASYNLOG
-    Log::get_instance()->init("ServerLog", 2000, 800000, 8); //异步日志模型 缓冲队列最大容量开到8
+    Log::get_instance()->init("ServerLog", 2000, 800000, 8); //异步日志模型 懒汉模式 缓冲队列最大容量开到8，缓冲队列即八个字符串
 #endif
 
 #ifdef SYNLOG
-    Log::get_instance()->init("ServerLog", 2000, 800000, 0); //同步日志模型 缓冲队列最大容量开到0 因为同步方式写日志直接将日志写到磁盘文件之中
+    Log::get_instance()->init("ServerLog", 2000, 800000, 0); //同步日志模型 懒汉模式 缓冲队列最大容量开到0 因为同步方式写日志直接将日志写到磁盘文件之中
 #endif
 
     if(argc <= 1) {
@@ -119,8 +119,9 @@ int main(int argc, char *argv[]) {
     //下面是对sigpipe信号进行处理 将 SIGPIPE 信号的处理方式设置为忽略
     addsig(SIGPIPE, SIG_IGN);
 
-    //创建数据库连接池 通过连接池类的GetInstance()函数建立一个类单例 
+    //创建数据库连接池 通过连接池类的GetInstance()函数建立一个类单例 其实本lab也没有必要为数据库池的类加上单例模式 因为我们new数据库类也只会new一次
     connection_pool *connPool = connection_pool::GetInstance();
+
     //主机地址为本机 用户名为root 密码991224 数据库为kaximoduodb 端口号3306 最大八个连接 对这些连接进行初始化 localhost可以代表本机地址 即数据库链表现在有八个已经与server连接的client在待命 
     connPool->init("localhost", "root", "991224", "kaximoduodb", 3306, 8);//最大连接数是8
 
@@ -133,11 +134,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    //创建一个数组用于保存所有的客户端信息 users是该http_conn数组首地址 将用户名与密码放在一个全局map表中
+    //创建一个空客户数组用于保存所有的客户端信息 users是该http_conn数组首地址 将用户名与密码放在一个全局map表中
     http_conn *users = new http_conn[maxfd];
 
     //初始化数据库读取表 在这之前肯定数据库池要先初始化好 池子中已经创立一定数量的连接，这些在connPool->init()中实现
-    //然后这个动作通过SELECT username,passwd FROM user这一个sql语句将原来保存在数据库中的连接的用户名与密码存放到全局数组map中，相当于读取历史登录记录
+    //然后这个动作通过SELECT username,passwd FROM user这一个sql语句将原来保存在数据库中的连接的用户名与密码存放到全局数组map_user中，相当于读取历史登录记录
     users->initmysql_result(connPool);//connPool是数据库连接池 
     
     int serverfd = socket(PF_INET, SOCK_STREAM, 0);
@@ -152,7 +153,7 @@ int main(int argc, char *argv[]) {
     serveraddr.sin_port = htons( atoi(argv[1]) );
     bind(serverfd, (struct sockaddr*)&serveraddr, sizeof(serveraddr) );
     
-    //这个5表示等待队列与已连接队列客户数量最多为5
+    //这个5表示等待队列与已连接队列客户数量最多为5，即设置最多有多少个客户端处于连接等待状态，如果接收到更多的连接请求则忽略。
     listen(serverfd, 5);
 
     //创建epoll对象 事件数组 添加
@@ -160,7 +161,7 @@ int main(int argc, char *argv[]) {
 
     int epollfd = epoll_create(5);
 
-    //将监听的文件描述符添加到epoll对象中 这里写一个函数实现 默认不对服务端套接字注册one_shot事件 因为理解one_shot的含义 不可能同时又两个线程同时处理server套接字
+    //将监听的文件描述符添加到epoll对象中 这里默认不对服务端套接字注册one_shot事件 因为理解one_shot的含义 不可能同时又两个线程同时处理server套接字
     addfd(epollfd, serverfd, false);
 
     http_conn::m_epollfd = epollfd;
@@ -172,19 +173,23 @@ int main(int argc, char *argv[]) {
     // 创建管道 管道有读端和写端 pipefd[0]表示读 pipefd[1]表示写
     bool ret = socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd);
     assert( ret != -1 );
-    setnonblocking( pipefd[1]);//管道写端设置为非阻塞
-    addfd( epollfd, pipefd[0],false );//监听管道读端
+    setnonblocking( pipefd[1]);//管道写端设置为非阻塞 我们的信号处理方式就是向管道写端将信号写进去，然后我们一直在监听管道读端
+    addfd( epollfd, pipefd[0], false );//监听管道读端
 
-    // 设置信号处理函数
-    addsig( SIGALRM , sig_handler);
-    addsig( SIGTERM , sig_handler);
+    // 设置信号及其对应处理函数
+    addsig( SIGALRM , sig_handler);             //定时器信号
+    addsig( SIGTERM , sig_handler);             //终止信号
     bool stop_server = false;
 
     bool timeout = false;
-    alarm(TIMESLOT);  //设置一个5s的定时器 5s到后 自动捕捉该alarm信号，触发sig_handler，将该alarm信号写入管道写端，serverfd监视到管道写端写事件后，将该信号读出，timeout设置为true，最后执行timerhandler，主要是删除链表中过时节点，以及设置下一个alarm定时器
+    alarm(TIMESLOT);  //设置一个5s的定时器 
+    //5s到后 自动捕捉该alarm信号，触发前面注册的sig_handler，将该alarm信号写入管道写端，
+    //serverfd监视到管道写端写事件后，将该信号读出，timeout设置为true，最后手动执行timerhandler()，
+    //主要是删除链表中过时节点，以及设置下一个alarm定时器
+    
     while(!stop_server) {
         //返回值代表监测到几个事件
-        //最后一个参数为-1，表示默认阻塞 成功时返回发生事件的文件描述数 失败返回-1 最后一个参数为-1 该函数默认阻塞
+        //最后一个参数为-1，表示默认阻塞 成功时返回发生事件的文件描述数 失败返回-1 
         int num = epoll_wait(epollfd, events, max_event_number, -1);
         /*
         "EINTR" 是一个在计算机编程中常见的缩写，代表 "Interrupted System Call"（中断的系统调用）。
@@ -201,13 +206,14 @@ int main(int argc, char *argv[]) {
         //循环遍历事件数组
         for(int i = 0; i < num; i++) {
             int sockfd = events[i].data.fd;
+            //只要是serverfd上有新事件，一定是新客户连接事件
             if(sockfd == serverfd) {
-                printf("%d\n",1);
+                printf("server处理新客户连接%d\n",1);
                 struct sockaddr_in clientaddr;
                 socklen_t client_addrlen = sizeof(clientaddr);
 #ifdef listenfdLT //服务端水平触发 这里一定用if 因为一次没有将事件处理完 下次事件仍然会重新注册 
                 int clientfd = accept(serverfd, (struct sockaddr*)&clientaddr, &client_addrlen);
-
+                printf("新客户socket%d\n", clientfd);
                 if(http_conn::m_usercount >= maxfd) {
                     //目前的连接数已经满了 即现在服务器连接的用户特别多
                     //给这个客户端写一个信息 “服务器正忙 需要等待”
@@ -215,16 +221,16 @@ int main(int argc, char *argv[]) {
                     close(clientfd);
                     continue;//跳过本轮事件对该client的处理
                 }
-
-                //将新的客户数据初始化 并放在数组中 直接以客户端文件描述符大小作为索引放入数组
+                //将新的客户数据初始化 并放在客户数组中 直接以客户端文件描述符大小作为索引放入数组
+                cout<<"debug1"<<endl;
                 users[clientfd].init(clientfd, clientaddr);
 
-                // 创建定时器，设置超时时间，然后绑定定时器与用户数据，最后将定时器添加到链表timer_lst中
+                // 创建定时器，设置超时时间，然后绑定定时器与用户数据，最后将定时器插入到链表timer_lst中
                 util_timer* timer = new util_timer;//这里会调用定时器类构造函数
                 timer->user_data = &users[clientfd];
                 time_t cur = time( NULL );
-                timer->expire = cur + 3 * TIMESLOT;//过15秒没有数据收发 即认为该客户连接超时
-                users[clientfd].timer = timer;
+                timer->expire = cur + 3 * TIMESLOT;//过15秒没有数据收发 即认为该客户连接超时 该客户就可以kill掉
+                users[clientfd].timer = timer;          //这里与上上上一行的timer指定客户形成了互包 如果相应客户类与定时器类相应成员使用shared_ptr，则要解决循环引用的问题，我们可以引入weak_ptr
                 timer_lst.add_timer( timer );//将该定时器插入链表
                 LOG_DEBUG("shuliang:%d",timer_lst.count);
                 Log::get_instance()->flush();
@@ -232,7 +238,8 @@ int main(int argc, char *argv[]) {
 #ifdef listenfdET //边缘模式一定要使用一个while循环 因为如果本次处理并没有完全处理完client事件，下次不会重复触发该事件，因此一定要用while确保事件处理完全
                 while (1)
                 {
-                    int clientfd = accept(serverfd, (struct sockaddr*)&clientaddr, &client_addrlen);
+                    int clientfd = accept(serverfd, (struct sockaddr*)&clientaddr, &client_addrlen);        //我们在向epollfd中注册serverfd时就设置了非阻塞，所以这里accept不会阻塞
+                    printf("新客户socket%d\n", clientfd);
                     if (clientfd < 0)//上一轮while循环已经将client的事情处理完全，正常在这里break
                     {
                         LOG_ERROR("%s:errno is:%d", "accept error", errno);
@@ -242,16 +249,23 @@ int main(int argc, char *argv[]) {
                     {
                         printf("%s\n","busy");
                         close(clientfd);
-                        break;//注意 这里用break 而不是continue
+                        break;//注意 这里用break 而不是continue 因为以后该用户还会重连
                     }
+                    cout<<"debug1"<<endl;
                     users[clientfd].init(clientfd, clientaddr);
                     // 创建定时器，设置超时时间，然后绑定定时器与用户数据，最后将定时器添加到链表timer_lst中
+                    cout<<"debug2"<<endl;
                     util_timer* timer = new util_timer;//这里会调用定时器类构造函数
+                    cout<<"debug3"<<endl;
                     timer->user_data = &users[clientfd];
+                    cout<<"debug4"<<endl;
                     time_t cur = time( NULL );
                     timer->expire = cur + 3 * TIMESLOT;//过15秒没有数据收发 即认为该客户连接超时
+                    cout<<"debug5"<<endl;
                     users[clientfd].timer = timer;
+                    cout<<"debug6"<<endl;
                     timer_lst.add_timer( timer );//将该定时器插入链表
+                    cout<<"debug7"<<endl;
                     LOG_DEBUG("shuliang:%d",timer_lst.count);
                     Log::get_instance()->flush();
                 }
@@ -259,39 +273,39 @@ int main(int argc, char *argv[]) {
 #endif
             }
             else if(events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {//当对方连接断开，会有一个EPOLLRDHUP事件  EPOLLHUP：对端挂断了套接字 EPOLLERR：发生错误
-                printf("%d\n",2);
+                printf("客户主动断开连接%d\n",2);
                 //对方异常断开或者错误等事件
                 util_timer* timer = users[sockfd].timer;
                 if( timer )
                 {
                     timer_lst.del_timer( timer );//从链表删除该定时器
                 }
-                users[sockfd].close_conn();
+                users[sockfd].close_conn();      //从epollfd例程中取消监视该客户
             }
-            else if((sockfd != pipefd[0]) && events[i].events & EPOLLIN) {
-                printf("%d\n",3);
+            else if((sockfd != pipefd[0]) && events[i].events & EPOLLIN) {  //如果不是管道读端而是客户有事件，并且对应读入事件
+                printf("客户发来请求报文%d\n",3);
                 //按照proactor模式，我们要在主线程中一次性把所有的数据读出来
                 util_timer* timer = users[sockfd].timer;
                 if(users[sockfd].read()) {
-                    // 如果某个客户端上有数据可读，则我们要调整该连接对应的定时器，以延迟该连接被关闭的时间。
+                    // 如果某个客户端上有数据可读，则我们要调整该连接对应的定时器，以延迟该连接被关闭的时间，否则可能读着读着该客户就超时了。
                     if( timer ) {
                         time_t cur = time( NULL );
                         timer->expire = cur + 3 * TIMESLOT;//将超时时间改为当前时间再加15秒
                         LOG_DEBUG("%s","adjust timer once");
                         timer_lst.adjust_timer( timer );
                     }
-                    //一次性把所有数据都读完 交给工作线程去处理业务逻辑 users+sockfd表示users指针偏移到sockfd位置 每次偏移步长为http_conn大小
+                    //一次性把所有数据都读完 把该客户交给工作线程去处理业务逻辑 users+sockfd表示users指针偏移到sockfd位置 每次偏移步长为http_conn大小
                     pool->append(users + sockfd);
                 }
                 else {//读取失败
                     if( timer ) {
-                    timer_lst.del_timer( timer );//从链表删除该定时器
+                        timer_lst.del_timer( timer );//从链表删除该定时器，下次该客户会重连的
                     }
                     users[sockfd].close_conn();
                 }
             }
-            else if(events[i].events & EPOLLOUT) {
-                printf("%d\n",4);
+            else if(events[i].events & EPOLLOUT) {                          //如果是客户的可写事件(我们客户已经在server处理新连接时向epollfd中添加监视)
+                printf("server向客户发送响应报文%d\n",4);
                 //一次性写完所有数据
                 LOG_DEBUG("shuliang%d\n",timer_lst.count);
                 Log::get_instance()->flush();
@@ -302,8 +316,7 @@ int main(int argc, char *argv[]) {
                         printf("%d\n",8);
                         LOG_DEBUG("shuliang%d\n",timer_lst.count);
                         timer_lst.del_timer( timer );//从链表删除该定时器
-                        LOG_DEBUG("shuliang%d\n",timer_lst.count);
-                        LOG_DEBUG("链表首尾%d,%d\n",timer_lst.gethead()==NULL,timer_lst.gettail()==NULL);
+                        LOG_DEBUG("shuliang%d\n", timer_lst.count);
                         Log::get_instance()->flush();
                     }
                     //关闭连接
@@ -311,8 +324,8 @@ int main(int argc, char *argv[]) {
                     users[sockfd].close_conn();
                 }
             }
-            else if( ( sockfd == pipefd[0] ) && ( events[i].events & EPOLLIN ) ) {//如果管道读端套接字有事件 并且发生可以读入事件
-                printf("%d\n",5);
+            else if( ( sockfd == pipefd[0] ) && ( events[i].events & EPOLLIN ) ) {//如果管道读端套接字有事件 并且发生可读事件 说明是有注册的信号发生了
+                printf("管道读端有信号事件%d\n",5);
                 // 处理信号
                 int sig;
                 char signals[1024];//接收缓冲区
@@ -329,11 +342,11 @@ int main(int argc, char *argv[]) {
                             case SIGALRM://定时时间(5s)到
                             {
                                 // 用timeout变量标记有定时任务需要处理，但不立即处理定时任务
-                                // 这是因为定时任务的优先级不是很高，我们优先处理其他更重要的任务。
+                                // 这是因为定时任务的优先级不是很高，我们优先处理其他更重要的任务。在最后我们处理定时任务，定时任务处理的实质就是将定时器链表过期节点删除
                                 timeout = true;
                                 break;//跳出遍历每一个字节的循环
                             }
-                            case SIGTERM://表示收到了进程终止信号
+                            case SIGTERM://表示收到了进程终止信号 该标志会终止主线程无限循环
                             {
                                 stop_server = true;
                             }
@@ -344,8 +357,8 @@ int main(int argc, char *argv[]) {
         }
         // 最后处理定时事件，因为I/O事件有更高的优先级。当然，这样做将导致定时任务不能精准的按照预定的时间执行。
         if( timeout ) {
-            printf("%d\n",6);
-            timer_handler();
+            printf("定时时间到，刷一遍链表%d\n",6);
+            timer_handler();                //删除链表中超时节点
             timeout = false;
         }
     }
@@ -358,8 +371,8 @@ int main(int argc, char *argv[]) {
     close(serverfd);
     close( pipefd[1] );
     close( pipefd[0] );
-    delete[] users;
-    delete pool;
+    delete[] users;         //删除server处理新客户连接时，new的每一个客户结构体
+    delete pool;            //删除线程池
 
 
 
@@ -412,8 +425,11 @@ worker中的run函数中m_queuestat.wait()
 
 编译指令：
 g++ *.cpp -lpthread
+或者直接make完事，简单快捷
 
-浏览器输入：192.168.88.100/9190:index.html
+浏览器输入：
+http://192.168.88.100:9190/index.html
+
 常见bug：
 只能创建八个线程 不能连接客户
 解决：将虚拟机防火墙关掉 systemctl stop firewalld

@@ -11,3 +11,160 @@
 
 
 可加功能：日志实现文件名+行数功能
+
+主体模块：
+1.定时器及链表类
+    class sort_timer_lst;
+        //成员函数无非就是对链表节点util_timer的增删改查
+        tick():     //SIGALARM 信号每次被触发就在其信号处理函数中执行一次 tick() 函数，以删除链表上过期节点，并且关闭与该客户的连接
+    class util_timer;
+        time_t expire;   // 任务超时时间，这里使用绝对时间
+        http_conn* user_data; //用户信息
+        util_timer* prev;    // 指向前一个定时器
+        util_timer* next;    // 指向后一个定时器
+
+2.日志类
+    懒汉模式与饿汉模式：前面是第一次调用的时候才在堆上分配内存，并且将堆地址赋值给类指针，其他时候为空
+                       而饿汉模式是在一开始就为该类在堆上分配空间，并赋值指针
+    class log;
+        static Log *get_instance();   
+        static void *flush_log_thread(void *args)//线程主函数；该线程主要不停地从缓冲队列取出一个字符串写入到文件中
+        bool init(const char *file_name, int log_buf_size = 8192, int split_lines = 5000000, int max_queue_size = 0);  
+        void write_log(int level, const char *format, ...);
+        void flush(void);//刷新磁盘文件缓冲区，不管使用同步还是异步方式，打完日志要调用flush
+        void *async_write_log()//异步写日志方法 其主要由线程主函数调用
+        block_queue<string> *m_log_queue; //阻塞队列 最重要的数据成员 用循环数组实现 是写日志进程与读日志进程共享的缓冲队列 其只在异步日志模式下其作用，因此在init函数里面初始化
+    阻塞队列模板类
+    class block_queue；
+        block_queue(int max_size = 1000)//构造函数
+        bool push(const T &item)  //producer 
+        bool pop(T &item) //customer
+        bool pop(T &item, int ms_timeout)//增加了超时处理
+        locker m_mutex;
+        cond m_cond;                //条件变量 用于调度生产者与消费者
+        T * m_array;//核心数据结构
+
+3.数据库连接池类
+    class connection_pool;
+        MYSQL *GetConnection();				 //线程获取数据库连接(预先埋了八个空闲连接) 消费者customer
+        bool ReleaseConnection(MYSQL *conn); //用完了，释放连接 生产者producer
+        int GetFreeConn();					 //获取当前空闲连接数
+        void DestroyPool();					 //销毁所有连接
+        static connection_pool *GetInstance(); //单例模式 懒汉模式 获取一个数据库连接池类的实例
+
+4.线程池类
+    class threadpool；
+        bool append(T *reauest);//当有一个任务到来，需要向请求队列添加任务 在当前场景，该T类型就是http_conn
+        static void* worker(void *arg);//线程主函数。必须是静态
+        void run();//子线程工作函数，主要有子线程调用
+        //线程数量
+        int m_thread_number;
+
+        //线程池数组 动态创建
+        pthread_t * m_threads;
+
+        //请求队列中年最多允许的，等待处理的请求数量 即请求队列最大容量
+        int m_max_requests;
+
+        //请求队列
+        std::list< T*> m_workqueue;
+
+        //互斥锁(用于各个线程共享的请求队列)
+        locker m_queuelocker;
+
+        //信号量 用来判断是否有任务需要处理(回想一下生产者消费者模型 使用信号量来避免死锁)
+        sem m_queuestat;
+
+        //是否结束线程 默认为false 不结束线程
+        bool m_stop;
+    //本lab中主线程调用append，相当于生产者，而线程池中八个子线程自创立之后一直在run，相当于消费者
+
+5.任务类，客户类（最繁琐 但不是很重要）
+    先定义了一堆状态量
+    class http_conn；
+        void initmysql_result(connection_pool *connPool);   //预备动作，server开始运作前先获取表中存储的历史遗留客户
+        void process();     ////处理客户端请求，线程池中八个子线程从任务缓冲队列获得主线程append的客户后，由子线程调用该函数进行逻辑处理
+        void init(int sockfd, struct sockaddr_in &addr) ;       //初始化新接收的客户连接，主要动作是将该客户添加到epollfd监视队列中
+        void close_conn();              //关闭连接
+        bool read();                    //非阻塞的读取客户端请求http报文到客户类的读缓存 主要由主线程调用，其读完后将该客户放到线程池的客户缓冲队列
+        bool write();                   //与上同理
+        HTTP_CODE process_read() ;      //解析http请求报文 由子线程调用
+        bool process_write(HTTP_CODE ret); //与上同理 写http响应报文
+        HTTP_CODE parse_request_line(char *text) ;//解析请求行
+        HTTP_CODE parse_headers(char *text) ;//解析请求头部
+        HTTP_CODE parse_content(char *text) ;//解析请求体
+        LINE_STATUS parse_line() ;//解析具体一行
+        char readbuff[READ_BUFFER_SIZE];        //读缓冲 存客户请求报文
+        char writebuff[WRITE_BUFFER_SIZE];      //写缓冲  存server决定返回的客户响应报文
+        HTTP_CODE do_request() ;                //实际响应动作
+
+7.locker类
+    class locker;           //互斥锁类
+    class cond;             //条件变量类
+        // 阻塞，调用了该函数，线程会阻塞，并且释放锁
+        bool wait(pthread_mutex_t *mutex)；
+        // 阻塞多长时间，调用该函数，线程会阻塞并占用锁，直到指定的时间结束并且释放锁
+        bool timewait(pthread_mutex_t *mutex, struct timespec t)
+        // 唤醒一个或者多个等待的线程
+        bool signal(pthread_mutex_t *mutex)
+        // 唤醒所有等待的线程
+        bool broadcast()
+    class sem;
+        int wait() //信号量减一
+        int post() //信号量加一
+    /*
+        一定要理解条件变量与信号量不同的使用场景
+        条件变量是协调未知进程数时用来调度wait或者signal
+        比如日志类中，可能同时二十个个进程在写日志，但是缓冲队列大小只有八个
+        所以可能有十二个进程的写动作会阻塞在wait处，直到日志类的线程将缓冲队列暂存的日志
+        pop到文件中，发一个signal信号，这些wait的进程又会被唤醒
+
+        而信号量是协调已知进程数来实现调度
+        而信号量可以设置初值，表示最多可以同时容纳的线程个数
+    */
+
+8、压测原理
+    通过命令行命令。设置子进程超时时间bench_time(单位为秒)，子进程数量，url
+    压测函数，通过解析命令行命令构成一个完整的request请求，请求server端的index.html。然后父进程fork出指定数量的子进程
+    同时所有父进程与子进程共享三个变量，bytes，failed(失败此时) speed(成功次数)
+    然后所有子进程都会设置一个定时器alarm，在benchtime时间内，不断地去尝试连接server端请求资源并读取请求结果，同时更新
+    bytes，speed，failed这三个变量，子进程结束，会将这三个值写到管道写端
+    父进程会读管道读端，读取子进程写入的三个值，所有子进程累加起来，在终端打印每分钟尝试与server连接次数，每秒server传递字节数，成功次数，失败次数
+    作为测试结果。
+
+9.问题：
+    1.水平触发与边缘触发
+        • LT（电平触发）：类似select，LT会去遍历在epoll事件表中每个文件描述符，来观察是否有我们感兴趣的事件发生，
+        如果有（触发了该文件描述符上的回调函数），epoll_wait就会以非阻塞的方式返回。若该epoll事件没有被处理完（没有返回EWOULDBLOCK），
+        该事件还会被后续的epoll_wait再次触发。
+        ET（边缘触发）：ET在发现有我们感兴趣的事件发生后，立即返回，并且sleep这一事件的epoll_wait，不管该事件有没有结束。
+        举例来说，使用边缘触发，在server中，要使用while来处理客户新连接，在client，要使用while来处理用户的读与写
+    
+    2.设置端口复用的目的
+    即允许服务端在主动关闭后不用经历time_wait立即绑定相同端口
+
+    3.什么是epoll_oneshot事件：
+        EPOLLONESHOT事件是一种在epoll机制中用于防止同一事件被触发多次的事件。
+        当一个socket上的事件被触发时，比如数据可读或者可写，
+        操作系统会对这个socket的文件描述符注册的所有监听该事件的操作进行触发。
+        然而，在某些情况下，一个socket上的事件可能在处理过程中再次被触发，
+        导致两个线程同时操作一个socket，这可能引发问题。
+
+        EPOLLONESHOT事件可以解决这个问题。对于注册了EPOLLONESHOT事件的文件描述符，
+        操作系统最多触发其上注册的一个可读、可写或者异常事件，且只触发一次，
+        除非使用epoll_ctl函数重置该文件描述符上EPOLLONESHOT事件。
+        这样，在一个线程正在使用socket时，其他线程无法操作该socket。
+        因此当server端完整处理完一个client的资源请求后，需要重新注册该客户端的监听事件，以准备该客户的后续行为（在http_conn类process()最后一行中）
+
+    4.什么是设置套接字非阻塞：
+        void setnonblocking(int fd) {
+            int old_flag = fcntl(fd, F_GETFL);
+            old_flag |= O_NONBLOCK;
+            fcntl(fd,F_SETFL, old_flag);
+        }
+
+        异步（非阻塞）I/O：当代码需要执行一个耗        同步（阻塞）I/O：在一个线程中，CPU执行代码的速度极快，然而，一旦遇到IO操作，如读写文件、发送网络数据时，就需要等待IO操作完成，才能继续进行下一步操作。这种情况称为同步IO。时的IO操作时，它只发出IO指令，并不等待IO结果，然后就去执行其他代码了。一段时间后，当IO返回结果时，再通知CPU进行处理。
+
+    5.http请求报文中的keep-alive
+        keep-alive 是一个在 HTTP 请求和响应头中都可以找到的字段，用于控制连接的持久性。在早期的 HTTP/1.0 版本中，每个请求和响应默认都是通过一个单独的 TCP 连接来完成的，这意味着每次请求之后，连接都会被关闭，然后再为下一个请求建立新的连接。这种做法效率不高，因为建立 TCP 连接需要时间和资源。
+        为了解决这个问题，HTTP/1.1 引入了 keep-alive 机制。当 keep-alive 被启用时，客户端和服务器之间的 TCP 连接在发送和接收完一个请求/响应后不会立即关闭，而是会保持打开状态，以便后续的请求和响应可以复用这个连接。这可以显著提高性能，减少网络延迟和服务器负载。

@@ -157,7 +157,7 @@ void Log::write_log(int level, const char *format, ...)
 void Log::flush(void)
 {
     m_mutex.lock();
-    //强制刷新写入文件
+    //强制刷新写入的日志文件
     fflush(m_fp);
     m_mutex.unlock();
 }

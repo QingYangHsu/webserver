@@ -13,7 +13,7 @@ class threadpool {
 public:
     threadpool(int thread_number = 8, int max_requests = 10000);
     ~threadpool();
-    bool append(T *reauest);//当有一个任务到来，需要向请求队列添加任务
+    bool append(T *reauest);//当有一个任务到来，需要向请求队列添加任务 在当前场景，该T类型就是http_conn
 
 
 private:
@@ -21,7 +21,7 @@ private:
     //在c++中，静态函数成员 可以直接访问类的静态成员变量，但不能访问非静态成员变量，也不能使用this指针
     static void* worker(void *arg);
     
-    //线程池启动起来
+    //子线程工作函数，主要有子线程调用
     void run();
 
 
@@ -44,7 +44,7 @@ private:
     locker m_queuelocker;
 
     //信号量 用来判断是否有任务需要处理(回想一下生产者消费者模型 使用信号量来避免死锁)
-    sem m_queuestat;
+    sem m_queuestat;        //默认初始化为0，表示请求队列中任务量为0
 
     //是否结束线程 默认为false 不结束线程
     bool m_stop;
@@ -71,7 +71,7 @@ threadpool<T>::threadpool(int thread_number, int max_requests) :
         //在C++中，对指针变量执行"++"操作符会导致指针向前移动一个元素的大小。具体移动的字节数取决于指针所指向的类型。
         for(int i = 0; i<m_thread_number; i++) {
             printf("create the %dth thread\n", i);
-            // 将this指针作为参数传入静态线程主函数，这样线程主函数中就能使用类的非静态成员
+            // 将this指针作为参数传入静态线程主函数，这样线程主函数中就能使用线程池类的非静态成员
             if(pthread_create(m_threads+i, NULL, worker, this) != 0) { //worker是线程主函数
                 delete[] m_threads;
                 throw std::exception();
@@ -93,7 +93,7 @@ threadpool<T>::~threadpool() {
 
 //因为请求队列为所有线程所共享，所以为同步资源 所以更新请求队列要注意线程同步
 template<typename T>
-bool threadpool<T>::append(T *request) {
+bool threadpool<T>::append(T *request) {            //T类型即http——conn
     //lock
     m_queuelocker.lock();
     //当前请求队列的数据容量大于最大请求数
@@ -105,7 +105,7 @@ bool threadpool<T>::append(T *request) {
     m_workqueue.push_back(request);
     //unlock
     m_queuelocker.unlock();
-    //信号量加一 提醒各线程请求队列中数目加了一个 休眠的八个线程会苏醒一个来进行逻辑处理
+    //信号量加一 提醒各线程请求队列中数目加了一个 在m_queuestat休眠的八个线程会苏醒一个来进行逻辑处理
     m_queuestat.post();
     return true;
 }
@@ -113,7 +113,7 @@ bool threadpool<T>::append(T *request) {
 //线程主函数
 template<typename T>
 void* threadpool<T>::worker(void *arg) {
-    threadpool *pool = (threadpool *)arg;
+    threadpool *pool = (threadpool *)arg;           //pool实际就是传入的线程池类的this指针，可以当做threadpool*使用
     pool->run();
     //这个返回值没什么用
     return pool;
@@ -127,7 +127,7 @@ void threadpool<T>::run() {
         //类似于生产者消费者代码，如果请求队列不为空，则不会阻塞，并将信号量减一 如果为空，则一直在这里阻塞
         m_queuestat.wait(); //m_queuestat是信号量 所以线程刚一启动会在这里阻塞 因为信号量初值为0
         m_queuelocker.lock();
-        //判断请求队列是否为空 
+        //判断请求队列是否为空 二次判断的目的是，有可能主线程刚append一个客户进来，同时唤醒了好几个子线程，形成了竞态条件
         if(m_workqueue.empty()) {
             m_queuelocker.unlock();
             continue;
@@ -139,12 +139,13 @@ void threadpool<T>::run() {
         if(!request) {
             continue;
         }
-        //子线程从链式请求队列首部取得一个任务之后，调用任务类的执行程序进行逻辑处理
+        //子线程从链式请求队列首部取得一个任务之后，调用任务类的执行程序进行逻辑处理，该任务必然已经由主线程读完了，等待逻辑处理
         request->process();
     }
 }
 
 //append 与 run就相当于生产者消费者程序中的生产者线程主函数producer
 //与消费者线程主函数customer,两者通过条件变量协调线程同步
+//而本lab中主线程调用append，相当于生产者，而线程池中八个子线程自创立之后一直在run，相当于消费者
 
 #endif

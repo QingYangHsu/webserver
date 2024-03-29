@@ -17,10 +17,10 @@ class connection_pool
 public:
 	MYSQL *GetConnection();				 //线程获取数据库连接
 	bool ReleaseConnection(MYSQL *conn); //释放连接
-	int GetFreeConn();					 //获取连接
+	int GetFreeConn();					 //获取当前空闲连接数
 	void DestroyPool();					 //销毁所有连接
 
-	//单例模式 懒汉模式
+	//单例模式 懒汉模式 获取一个数据库连接池类的实例
 	static connection_pool *GetInstance();
 	//构造初始化
 	void init(string url, string User, string PassWord, string DataBaseName, int Port, unsigned int MaxConn); 
@@ -35,7 +35,7 @@ private:
 
 private:
 	locker lock;//使用的锁 因为数据库连接池中的连接属于临界资源 相当于线程池中的线程数组 
-	list<MYSQL *> connList; //连接池 容器为链表 也可以用数组实现 相当于一个缓冲队列
+	list<MYSQL *> connList; //连接池核心容器为链表 也可以用数组实现 相当于一个缓冲队列 用来储存八个连接
 	sem reserve;//信号量 表示空闲的连接数 回想一下线程池中，信号量可以用于post与wait，调度各个producer与costomer的行为 在这里仍然同理
 
 private:
@@ -47,6 +47,7 @@ private:
 };
 
 //将数据库连接(client)的获取与释放通过RAII机制封装，避免手动释放。
+//实际上就是对数据库生产者和消费者的调用函数多封装了一层，没什么大不了的
 class connectionRAII{
 
 public:
