@@ -1,0 +1,13 @@
+一开始浏览器输入http://192.168.88.100:9190/，服务器默认解析为m_url为judge.html，对应一个get行为，返回judge.html
+一开始浏览器输入http://192.168.88.100:9190/0，服务器默认解析为m_url为register.html，对应一个get行为，返回register.html
+一开始浏览器输入http://192.168.88.100:9190/1，服务器默认解析为m_url为log.html，对应一个get行为，返回log.html
+对于浏览器输入http://192.168.88.100:9190/2与http://192.168.88.100:9190/3来说，server会返回失败，
+因为2与3对应的都是post行为
+一开始浏览器输入http://192.168.88.100:9190/5，服务器默认解析为m_url为picture.html，对应一个get行为，返回log.html
+一开始浏览器输入http://192.168.88.100:9190/6，服务器默认解析为m_url为video.html，对应一个get行为，返回log.html
+一开始浏览器输入http://192.168.88.100:9190/7，服务器默认解析为m_url为fans.html，对应一个get行为，返回log.html
+一开始浏览器输入http://192.168.88.100:9190/index.html,对应一个get行为，返回index.html
+
+
+那么client在server返回的register.html中，用户在输入用户名密码之后点击注册按钮，client会发一个post报文，如果注册成功，server发log.html，如果失败，发registererrot.html报文
+client在server返回的log.html中，用户在输入用户名密码之后点击登录按钮，client会发一个post报文，如果登录成功,server发welcome.html，如果失败，发logerror.html报文
